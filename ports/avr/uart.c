@@ -39,12 +39,18 @@
 #define REG_UCSRA	UCSR0A
 #define REG_UCSRB	UCSR0B
 #define REG_UBRRL	UBRR0L
+#ifdef UBRR0
 #define REG_UBRR	UBRR0
+#else
+#define REG_UBRR	UBRR0L
+#endif
 #define REG_UDR		UDR0
 #define BIT_TXEN    TXEN0
 #define BIT_RXEN    RXEN0
 #define BIT_UDRE    UDRE0
+#ifndef U2X
 #define U2X         U2X0
+#endif
 #endif
 
 

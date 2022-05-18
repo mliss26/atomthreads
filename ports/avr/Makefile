@@ -15,7 +15,7 @@ CC=/usr/bin/avr-gcc
 OBJCOPY=/usr/bin/avr-objcopy
 SIZE=/usr/bin/avr-size
 UISP=/usr/bin/uisp
-SIMAVR=/usr/local/bin/simavr
+SIMAVR=/usr/bin/simavr
 AVRDUDE=avrdude
 AVARICE=avarice
 
@@ -30,7 +30,7 @@ AVARICE_PROG=-2 -j usb
 CPPDEFINES=-DF_CPU=$(F_CPU) -DUART_U2X
 
 # Enable stack-checking. WARNING: the full automated test suite currently
-# requires a little over 1KB RAM with stack-checking enabled. If you are 
+# requires a little over 1KB RAM with stack-checking enabled. If you are
 # using a device with 1KB internal SRAM and no external SRAM then you
 # must disable stack-checking to run all of the automated tests.
 STACK_CHECK=true
@@ -46,7 +46,7 @@ APP_OBJECTS = atomport.o atomport-private.o uart.o tests-main.o
 APP_ASM_OBJECTS = atomport-asm.o
 
 # Kernel object files
-KERNEL_OBJECTS = atomkernel.o atomsem.o atommutex.o atomtimer.o atomqueue.o
+KERNEL_OBJECTS = atomkernel.o atomsem.o atommutex.o atomtimer.o atomqueue.o atomevent.o
 
 # Collection of built objects (excluding test applications)
 ALL_OBJECTS = $(APP_OBJECTS) $(APP_ASM_OBJECTS) $(KERNEL_OBJECTS)

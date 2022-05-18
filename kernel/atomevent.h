@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2022, Matt Liss
  * Copyright (c) 2010, Kelvin Lawson. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -26,32 +27,29 @@
  * ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
  * POSSIBILITY OF SUCH DAMAGE.
  */
-#ifndef __ATOM_QUEUE_H
-#define __ATOM_QUEUE_H
+
+#ifndef __ATOM_EVENT_H
+#define __ATOM_EVENT_H
 
 #ifdef __cplusplus
 extern "C" {
 #endif
 
-typedef struct atom_queue
+typedef struct atom_event
 {
-    ATOM_TCB *  putSuspQ;       /* Queue of threads waiting to send */
-    ATOM_TCB *  getSuspQ;       /* Queue of threads waiting to receive */
-    uint8_t *   buff_ptr;       /* Pointer to queue data area */
-    uint32_t    unit_size;      /* Size of each message */
-    uint32_t    max_num_msgs;   /* Max number of storable messages */
-    uint32_t    insert_index;   /* Next byte index to insert into */
-    uint32_t    remove_index;   /* Next byte index to remove from */
-    uint32_t    num_msgs_stored;/* Number of messages stored */
-} ATOM_QUEUE;
+    ATOM_TCB *tcb_ptr;  /* Thread suspended on this event */
+    uint32_t flags;     /* Event flags */
+    uint32_t mask;      /* Event wait mask */
+} ATOM_EVENT;
 
-extern uint8_t atomQueueCreate (ATOM_QUEUE *qptr, uint8_t *buff_ptr, uint32_t unit_size, uint32_t max_num_msgs);
-extern uint8_t atomQueueDelete (ATOM_QUEUE *qptr);
-extern uint8_t atomQueueGet (ATOM_QUEUE *qptr, int32_t timeout, uint8_t *msgptr);
-extern uint8_t atomQueuePut (ATOM_QUEUE *qptr, int32_t timeout, uint8_t *msgptr);
+extern uint8_t atomEventCreate (ATOM_EVENT *event);
+extern uint8_t atomEventDelete (ATOM_EVENT *event);
+extern uint8_t atomEventWait (ATOM_EVENT *event, uint32_t mask, uint32_t *value, int32_t timeout);
+extern uint8_t atomEventSet (ATOM_EVENT *event, uint32_t mask);
+extern uint8_t atomEventClear (ATOM_EVENT *event, uint32_t mask);
 
 #ifdef __cplusplus
 }
 #endif
 
-#endif /* __ATOM_QUEUE_H */
+#endif /* __ATOM_EVENT_H */

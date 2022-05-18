@@ -1,4 +1,5 @@
 /*
+ * Copyright (c) 2022, Matt Liss
  * Copyright (c) 2010, Kelvin Lawson. All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
@@ -28,17 +29,16 @@
  */
 
 
-/** 
+/**
  * \file
- * Semaphore library.
+ * Event library.
  *
- *
- * This module implements a counting semaphore library with the following
+ * This module implements an event signalling library with the following
  * features:
  *
  * \par Flexible blocking APIs
- * Threads which wish to decrement a semaphore can choose whether to block,
- * block with timeout, or not block if the semaphore has reached zero.
+ * Threads which wish to wait on an event can choose whether to block,
+ * block with timeout, or not block if the event is not signalled.
  *
  * \par Interrupt-safe calls
  * All APIs can be called from interrupt context. Any calls which could
@@ -47,101 +47,76 @@
  * which would block from interrupt context will be automatically and
  * safely prevented.
  *
- * \par Priority-based queueing
- * Where multiple threads are blocking on a semaphore, they are woken in
- * order of the threads' priorities. Where multiple threads of the same
- * priority are blocking, they are woken in FIFO order.
- *
- * \par Count up to 255
- * Semaphore counts can be initialised and incremented up to a maximum of 255.
- *
- * \par Smart semaphore deletion
- * Where a semaphore is deleted while threads are blocking on it, all blocking
- * threads are woken and returned a status code to indicate the reason for
+ * \par Smart event deletion
+ * Where an event is deleted while a thread is blocking on it, the blocking
+ * thread is woken and returned a status code to indicate the reason for
  * being woken.
  *
  *
  * \n <b> Usage instructions: </b> \n
  *
- * All semaphore objects must be initialised before use by calling
- * atomSemCreate(). Once initialised atomSemGet() and atomSemPut() are used to
- * decrement and increment the semaphore count respectively.
+ * All event objects must be initialised before use by calling
+ * atomEventCreate(). Once initialised atomEventSet() and atomEventClear() are
+ * used to set or clear the individual event flags, respectively.
+ * One thread at a time can wait for one or more flags in an event with
+ * atomEventWait(). A call to atomEventSet() with a specific flag bit set will
+ * wake up a thread which is waiting on the same event if it specified a flag
+ * mask containing the same bit.
  *
- * If a semaphore count reaches zero, further calls to atomSemGet() will block
- * the calling thread (unless the calling parameters request no blocking). If
- * a call is made to atomSemPut() while threads are blocking on a zero-count
- * semaphore, the highest priority thread is woken. Where multiple threads of
- * the same priority are blocking, they are woken in the order in which the
- * threads started blocking. 
- *
- * A semaphore which is no longer required can be deleted using
- * atomSemDelete(). This function automatically wakes up any threads which are
- * waiting on the deleted semaphore.
- *
- *
- * \n <b> Notes: </b> \n
- *
- * Note that those considering using a semaphore initialised to 1 for mutual
- * exclusion purposes may wish to investigate the mutex library available in
- * Atomthreads.
+ * An event which is no longer required can be deleted using
+ * atomEventDelete(). This function automatically wakes up any threads which are
+ * waiting on the deleted event.
  *
  */
 
 
 #include "atom.h"
-#include "atomsem.h"
+#include "atomevent.h"
 #include "atomtimer.h"
 
 
 /* Local data types */
 
-typedef struct sem_timer
-{
-    ATOM_TCB *tcb_ptr;  /* Thread which is suspended with timeout */
-    ATOM_SEM *sem_ptr;  /* Semaphore the thread is suspended on */
-} SEM_TIMER;
-
-
 /* Forward declarations */
 
-static void atomSemTimerCallback (POINTER cb_data);
+static void atomEventTimerCallback (POINTER cb_data);
 
 
 /**
- * \b atomSemCreate
+ * \b atomEventCreate
  *
- * Initialises a semaphore object.
+ * Initialises an event object.
  *
- * Must be called before calling any other semaphore library routines on a
- * semaphore. Objects can be deleted later using atomSemDelete().
+ * Must be called before calling any other event library routines on an
+ * event. Objects can be deleted later using atomEventDelete().
  *
- * Does not allocate storage, the caller provides the semaphore object.
+ * Does not allocate storage, the caller provides the event object.
  *
  * This function can be called from interrupt context.
  *
- * @param[in] sem Pointer to semaphore object
- * @param[in] initial_count Initial count value
+ * @param[in] event Pointer to event object
  *
  * @retval ATOM_OK Success
  * @retval ATOM_ERR_PARAM Bad parameters
  */
-uint8_t atomSemCreate (ATOM_SEM *sem, uint8_t initial_count)
+uint8_t atomEventCreate (ATOM_EVENT *event)
 {
     uint8_t status;
 
     /* Parameter check */
-    if (sem == NULL)
+    if (event == NULL)
     {
-        /* Bad semaphore pointer */
+        /* Bad event pointer */
         status = ATOM_ERR_PARAM;
     }
     else
     {
-        /* Set the initial count */
-        sem->count = initial_count;
+        /* Set the initial flags */
+        event->flags = 0;
+        event->mask = 0;
 
-        /* Initialise the suspended threads queue */
-        sem->suspQ = NULL;
+        /* Initialise the suspended thread */
+        event->tcb_ptr = NULL;
 
         /* Successful */
         status = ATOM_OK;
@@ -152,26 +127,26 @@ uint8_t atomSemCreate (ATOM_SEM *sem, uint8_t initial_count)
 
 
 /**
- * \b atomSemDelete
+ * \b atomEventDelete
  *
- * Deletes a semaphore object.
+ * Deletes an event object.
  *
- * Any threads currently suspended on the semaphore will be woken up with
+ * Any thread currently suspended on the event will be woken up with
  * return status ATOM_ERR_DELETED. If called at thread context then the
  * scheduler will be called during this function which may schedule in one
  * of the woken threads depending on relative priorities.
  *
  * This function can be called from interrupt context, but loops internally
- * waking up all threads blocking on the semaphore, so the potential
+ * waking up all threads blocking on the event, so the potential
  * execution cycles cannot be determined in advance.
  *
- * @param[in] sem Pointer to semaphore object
+ * @param[in] event Pointer to event object
  *
  * @retval ATOM_OK Success
  * @retval ATOM_ERR_QUEUE Problem putting a woken thread on the ready queue
  * @retval ATOM_ERR_TIMER Problem cancelling a timeout on a woken thread
  */
-uint8_t atomSemDelete (ATOM_SEM *sem)
+uint8_t atomEventDelete (ATOM_EVENT *event)
 {
     uint8_t status;
     CRITICAL_STORE;
@@ -179,9 +154,9 @@ uint8_t atomSemDelete (ATOM_SEM *sem)
     uint8_t woken_threads = FALSE;
 
     /* Parameter check */
-    if (sem == NULL)
+    if (event == NULL)
     {
-        /* Bad semaphore pointer */
+        /* Bad event pointer */
         status = ATOM_ERR_PARAM;
     }
     else
@@ -190,15 +165,14 @@ uint8_t atomSemDelete (ATOM_SEM *sem)
         status = ATOM_OK;
 
         /* Wake up all suspended tasks */
-        while (1)
-        {
+        do {
             /* Enter critical region */
             CRITICAL_START ();
 
             /* Check if any threads are suspended */
-            tcb_ptr = tcbDequeueHead (&sem->suspQ);
+            tcb_ptr = event->tcb_ptr;
 
-            /* A thread is suspended on the semaphore */
+            /* A thread is suspended on the event */
             if (tcb_ptr)
             {
                 /* Return error status to the waiting thread */
@@ -231,7 +205,6 @@ uint8_t atomSemDelete (ATOM_SEM *sem)
 
                     /* Flag as no timeout registered */
                     tcb_ptr->suspend_timo_cb = NULL;
-
                 }
 
                 /* Exit critical region */
@@ -248,7 +221,7 @@ uint8_t atomSemDelete (ATOM_SEM *sem)
                 CRITICAL_END ();
                 break;
             }
-        }
+        } while (0);
 
         /* Call scheduler if any threads were woken up */
         if (woken_threads == TRUE)
@@ -267,26 +240,26 @@ uint8_t atomSemDelete (ATOM_SEM *sem)
 
 
 /**
- * \b atomSemGet
+ * \b atomEventWait
  *
- * Perform a get operation on a semaphore.
+ * Perform a wait operation on an event.
  *
- * This decrements the current count value for the semaphore and returns.
- * If the count value is already zero then the call will block until the
- * count is incremented by another thread, or until the specified \c timeout
- * is reached. Blocking threads will also be woken if the semaphore is
+ * This waits for one or more event bits as specified by mask.
+ * If no bits are set then the call will block until one is set
+ * by another thread, or until the specified \c timeout is reached.
+ * Blocking threads will also be woken if the event is
  * deleted by another thread while blocking.
  *
  * Depending on the \c timeout value specified the call will do one of
- * the following if the count value is zero:
+ * the following if the event flags are zero:
  *
- * \c timeout == 0 : Call will block until the count is non-zero \n
- * \c timeout > 0 : Call will block until non-zero up to the specified timeout \n
- * \c timeout == -1 : Return immediately if the count is zero \n
+ * \c timeout == 0 : Call will block until the flags are non-zero \n
+ * \c timeout > 0 : Call will block until non-zero flags up to the specified timeout \n
+ * \c timeout == -1 : Return immediately if the flags are zero \n
  *
  * If the call needs to block and \c timeout is zero, it will block
- * indefinitely until atomSemPut() or atomSemDelete() is called on the
- * semaphore.
+ * indefinitely until atomEventSet() or atomEventDelete() is called on the
+ * event.
  *
  * If the call needs to block and \c timeout is non-zero, the call will only
  * block for the specified number of system ticks after which time, if the
@@ -298,44 +271,48 @@ uint8_t atomSemDelete (ATOM_SEM *sem)
  * This function can only be called from interrupt context if the \c timeout
  * parameter is -1 (in which case it does not block).
  *
- * @param[in] sem Pointer to semaphore object
- * @param[in] timeout Max system ticks to block (0 = forever)
+ * @param[in]  event Pointer to event object
+ * @param[in]  mask Bitmask of events to wait on
+ * @param[out] value Bitmask of event(s) which satisfied the wait
+ * @param[in]  timeout Max system ticks to block (0 = forever)
  *
  * @retval ATOM_OK Success
- * @retval ATOM_TIMEOUT Semaphore timed out before being woken
+ * @retval ATOM_TIMEOUT event timed out before being woken
  * @retval ATOM_WOULDBLOCK Called with timeout == -1 but count is zero
- * @retval ATOM_ERR_DELETED Semaphore was deleted while suspended
+ * @retval ATOM_ERR_DELETED event was deleted while suspended
  * @retval ATOM_ERR_CONTEXT Not called in thread context and attempted to block
  * @retval ATOM_ERR_PARAM Bad parameter
  * @retval ATOM_ERR_QUEUE Problem putting the thread on the suspend queue
  * @retval ATOM_ERR_TIMER Problem registering the timeout
  */
-uint8_t atomSemGet (ATOM_SEM *sem, int32_t timeout)
+uint8_t atomEventWait (ATOM_EVENT *event, uint32_t mask, uint32_t *value, int32_t timeout)
 {
     CRITICAL_STORE;
     uint8_t status;
-    SEM_TIMER timer_data;
     ATOM_TIMER timer_cb;
     ATOM_TCB *curr_tcb_ptr;
 
     /* Check parameters */
-    if (sem == NULL)
+    if (event == NULL)
     {
-        /* Bad semaphore pointer */
+        /* Bad event pointer */
         status = ATOM_ERR_PARAM;
     }
     else
     {
-        /* Protect access to the semaphore object and OS queues */
+        /* Protect access to the event object and OS queues */
         CRITICAL_START ();
 
-        /* If count is zero, block the calling thread */
-        if (sem->count == 0)
+        if (value != NULL)
+            *value = 0;
+
+        /* If flags are zero, block the calling thread */
+        if ((event->flags & mask) == 0)
         {
             /* If called with timeout >= 0, we should block */
             if (timeout >= 0)
             {
-                /* Count is zero, block the calling thread */
+                /* flags are zero, block the calling thread */
 
                 /* Get the current TCB */
                 curr_tcb_ptr = atomCurrentContext();
@@ -343,8 +320,8 @@ uint8_t atomSemGet (ATOM_SEM *sem, int32_t timeout)
                 /* Check we are actually in thread context */
                 if (curr_tcb_ptr)
                 {
-                    /* Add current thread to the suspend list on this semaphore */
-                    if (tcbEnqueuePriority (&sem->suspQ, curr_tcb_ptr) != ATOM_OK)
+                    /* Add current thread to the suspend list on this event */
+                    if (event->tcb_ptr != NULL)
                     {
                         /* Exit critical region */
                         CRITICAL_END ();
@@ -354,6 +331,10 @@ uint8_t atomSemGet (ATOM_SEM *sem, int32_t timeout)
                     }
                     else
                     {
+                        /* Save event data for atomEventSet() */
+                        event->tcb_ptr = curr_tcb_ptr;
+                        event->mask = mask;
+
                         /* Set suspended status for the current thread */
                         curr_tcb_ptr->suspended = TRUE;
 
@@ -363,18 +344,14 @@ uint8_t atomSemGet (ATOM_SEM *sem, int32_t timeout)
                         /* Register a timer callback if requested */
                         if (timeout)
                         {
-                            /* Fill out the data needed by the callback to wake us up */
-                            timer_data.tcb_ptr = curr_tcb_ptr;
-                            timer_data.sem_ptr = sem;
-
                             /* Fill out the timer callback request structure */
-                            timer_cb.cb_func = atomSemTimerCallback;
-                            timer_cb.cb_data = (POINTER)&timer_data;
+                            timer_cb.cb_func = atomEventTimerCallback;
+                            timer_cb.cb_data = (POINTER)event;
                             timer_cb.cb_ticks = timeout;
 
                             /**
                              * Store the timer details in the TCB so that we can
-                             * cancel the timer callback if the semaphore is put
+                             * cancel the timer callback if the event is set
                              * before the timeout occurs.
                              */
                             curr_tcb_ptr->suspend_timo_cb = &timer_cb;
@@ -386,7 +363,8 @@ uint8_t atomSemGet (ATOM_SEM *sem, int32_t timeout)
                                 status = ATOM_ERR_TIMER;
 
                                 /* Clean up and return to the caller */
-                                (void)tcbDequeueEntry (&sem->suspQ, curr_tcb_ptr);
+                                event->tcb_ptr = NULL;
+                                event->mask = 0;
                                 curr_tcb_ptr->suspended = FALSE;
                                 curr_tcb_ptr->suspend_timo_cb = NULL;
                             }
@@ -399,9 +377,6 @@ uint8_t atomSemGet (ATOM_SEM *sem, int32_t timeout)
                             curr_tcb_ptr->suspend_timo_cb = NULL;
                         }
 
-                        /* Exit critical region */
-                        CRITICAL_END ();
-
                         /* Check no errors have occurred */
                         if (status == ATOM_OK)
                         {
@@ -413,30 +388,30 @@ uint8_t atomSemGet (ATOM_SEM *sem, int32_t timeout)
                             atomSched (FALSE);
 
                             /**
-                             * Normal atomSemPut() wakeups will set ATOM_OK status,
-                             * while timeouts will set ATOM_TIMEOUT and semaphore
+                             * Normal atomEventSet() wakeups will set ATOM_OK status,
+                             * while timeouts will set ATOM_TIMEOUT and event
                              * deletions will set ATOM_ERR_DELETED.
                              */
                             status = curr_tcb_ptr->suspend_wake_status;
 
                             /**
                              * If we have been woken up with ATOM_OK then
-                             * another thread incremented the semaphore and
-                             * handed control to this thread. In theory the
-                             * the posting thread increments the counter and
-                             * as soon as this thread wakes up we decrement
-                             * the counter here, but to prevent another
-                             * thread preempting this thread and decrementing
-                             * the semaphore before this section was
-                             * scheduled back in, we emulate the increment
-                             * and decrement by not incrementing in the
-                             * atomSemPut() and not decrementing here. The
-                             * count remains zero throughout preventing other
-                             * threads preempting before we decrement the
-                             * count again.
+                             * another thread set a flag in the event and
+                             * handed control to this thread. Return any
+                             * set flags that were in the wait mask.
                              */
+                            if (status == ATOM_OK && value != NULL)
+                            {
+                                *value = event->flags & event->mask;
+                            }
 
+                            /* Clean up event data */
+                            event->tcb_ptr = NULL;
+                            event->mask = 0;
                         }
+
+                        /* Exit critical region */
+                        CRITICAL_END ();
                     }
                 }
                 else
@@ -450,15 +425,17 @@ uint8_t atomSemGet (ATOM_SEM *sem, int32_t timeout)
             }
             else
             {
-                /* timeout == -1, requested not to block and count is zero */
+                /* timeout == -1, requested not to block and event flags are zero */
                 CRITICAL_END();
                 status = ATOM_WOULDBLOCK;
             }
         }
         else
         {
-            /* Count is non-zero, just decrement it and return to calling thread */
-            sem->count--;
+            /* At least one event flag is set, just return to calling thread */
+            if (value != NULL) {
+                *value = event->flags & mask;
+            }
 
             /* Exit critical region */
             CRITICAL_END ();
@@ -473,53 +450,49 @@ uint8_t atomSemGet (ATOM_SEM *sem, int32_t timeout)
 
 
 /**
- * \b atomSemPut
+ * \b atomEventSet
  *
- * Perform a put operation on a semaphore.
+ * Perform a set operation on event flags.
  *
- * This increments the current count value for the semaphore and returns.
+ * This sets the specified event flags and returns.
  *
- * If the count value was previously zero and there are threads blocking on the
- * semaphore, the call will wake up the highest priority thread suspended. Only
- * one thread is woken per call to atomSemPut(). If multiple threads of the
- * same priority are suspended, they are woken in order of suspension (FIFO).
+ * If the flags were previously zero and there is a thread blocking on the
+ * event, the call will wake up the suspended thread.
  *
  * This function can be called from interrupt context.
  *
- * @param[in] sem Pointer to semaphore object
+ * @param[in] event Pointer to event object
+ * @param[in] mask  Event flags to set
  *
  * @retval ATOM_OK Success
- * @retval ATOM_ERR_OVF The semaphore count would have overflowed (>255)
  * @retval ATOM_ERR_PARAM Bad parameter
  * @retval ATOM_ERR_QUEUE Problem putting a woken thread on the ready queue
  * @retval ATOM_ERR_TIMER Problem cancelling a timeout for a woken thread
  */
-uint8_t atomSemPut (ATOM_SEM * sem)
+uint8_t atomEventSet (ATOM_EVENT *event, uint32_t mask)
 {
     uint8_t status;
     CRITICAL_STORE;
     ATOM_TCB *tcb_ptr;
 
     /* Check parameters */
-    if (sem == NULL)
+    if (event == NULL || mask == 0)
     {
-        /* Bad semaphore pointer */
+        /* Bad event pointer or no flags to set */
         status = ATOM_ERR_PARAM;
     }
     else
     {
-        /* Protect access to the semaphore object and OS queues */
+        /* Protect access to the event object and OS queues */
         CRITICAL_START ();
 
-        /* If any threads are blocking on the semaphore, wake up one */
-        if (sem->suspQ)
+        /* Set the event flags regardless of wait status */
+        event->flags |= mask;
+
+        /* If a thread is blocking on the event just set, wake it up */
+        if (event->tcb_ptr != NULL && (event->flags & event->mask) != 0)
         {
-            /**
-             * Threads are woken up in priority order, with a FIFO system
-             * used on same priority threads. We always take the head,
-             * ordering is taken care of by an ordered list enqueue.
-             */
-            tcb_ptr = tcbDequeueHead (&sem->suspQ);
+            tcb_ptr = event->tcb_ptr;
             if (tcbEnqueuePriority (&tcbReadyQ, tcb_ptr) != ATOM_OK)
             {
                 /* Exit critical region */
@@ -537,7 +510,7 @@ uint8_t atomSemPut (ATOM_SEM * sem)
                 if ((tcb_ptr->suspend_timo_cb != NULL)
                     && (atomTimerCancel (tcb_ptr->suspend_timo_cb) != ATOM_OK))
                 {
-                    /* There was a problem cancelling a timeout on this semaphore */
+                    /* There was a problem cancelling a timeout on this event */
                     status = ATOM_ERR_TIMER;
                 }
                 else
@@ -562,21 +535,10 @@ uint8_t atomSemPut (ATOM_SEM * sem)
             }
         }
 
-        /* If no threads waiting, just increment the count and return */
+        /* If no threads waiting, just return */
         else
         {
-            /* Check for count overflow */
-            if (sem->count == 255)
-            {
-                /* Don't increment, just return error status */
-                status = ATOM_ERR_OVF;
-            }
-            else
-            {
-                /* Increment the count and return success */
-                sem->count++;
-                status = ATOM_OK;
-            }
+            status = ATOM_OK;
 
             /* Exit critical region */
             CRITICAL_END ();
@@ -588,65 +550,70 @@ uint8_t atomSemPut (ATOM_SEM * sem)
 
 
 /**
- * \b atomSemResetCount
+ * \b atomEventClear
  *
- * Set a new count value on a semaphore.
+ * Perform a clear operation on event flags.
  *
- * Care must be taken when using this function, as there may be threads
- * suspended on the semaphore. In general it should only be used once a
- * semaphore is out of use.
+ * Care must be taken when using this function, as there may be a thread
+ * suspended on the event. In general it should only be used by a thread
+ * that was waiting on the event after being woken up.
  *
  * This function can be called from interrupt context.
  *
- * @param[in] sem Pointer to semaphore object
- * @param[in] count New count value
+ * @param[in] event Pointer to event object
+ * @param[in] mask  Event flags to clear
  *
  * @retval ATOM_OK Success
  * @retval ATOM_ERR_PARAM Bad parameter
  */
-uint8_t atomSemResetCount (ATOM_SEM *sem, uint8_t count)
+uint8_t atomEventClear (ATOM_EVENT *event, uint32_t mask)
 {
     uint8_t status;
+    CRITICAL_STORE;
 
     /* Parameter check */
-    if (sem == NULL)
+    if (event == NULL)
     {
-        /* Bad semaphore pointer */
+        /* Bad event pointer */
         status = ATOM_ERR_PARAM;
     }
     else
     {
-        /* Set the count */
-        sem->count = count;
+        /* Protect access to the event object */
+        CRITICAL_START ();
+
+        /* Clear the event flags */
+        event->flags &= ~mask;
 
         /* Successful */
         status = ATOM_OK;
+
+        /* Exit critical region */
+        CRITICAL_END ();
     }
 
     return (status);
-
 }
 
 
 /**
- * \b atomSemTimerCallback
+ * \b atomEventTimerCallback
  *
  * This is an internal function not for use by application code.
  *
  * Timeouts on suspended threads are notified by the timer system through
  * this generic callback. The timer system calls us back with a pointer to
- * the relevant \c SEM_TIMER object which is used to retrieve the
- * semaphore details.
+ * the relevant \c ATOM_EVENT object.
  *
- * @param[in] cb_data Pointer to a SEM_TIMER object
+ * @param[in] cb_data Pointer to an ATOM_EVENT object
  */
-static void atomSemTimerCallback (POINTER cb_data)
+static void atomEventTimerCallback (POINTER cb_data)
 {
-    SEM_TIMER *timer_data_ptr;
+    ATOM_EVENT *timer_data_ptr;
     CRITICAL_STORE;
 
-    /* Get the SEM_TIMER structure pointer */
-    timer_data_ptr = (SEM_TIMER *)cb_data;
+    /* Get the ATOM_EVENT structure pointer */
+    timer_data_ptr = (ATOM_EVENT *)cb_data;
 
     /* Check parameter is valid */
     if (timer_data_ptr)
@@ -659,9 +626,6 @@ static void atomSemTimerCallback (POINTER cb_data)
 
         /* Flag as no timeout registered */
         timer_data_ptr->tcb_ptr->suspend_timo_cb = NULL;
-
-        /* Remove this thread from the semaphore's suspend list */
-        (void)tcbDequeueEntry (&timer_data_ptr->sem_ptr->suspQ, timer_data_ptr->tcb_ptr);
 
         /* Put the thread on the ready queue */
         (void)tcbEnqueuePriority (&tcbReadyQ, timer_data_ptr->tcb_ptr);
