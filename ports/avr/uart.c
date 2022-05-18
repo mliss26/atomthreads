@@ -29,6 +29,7 @@
 #define REG_UCSRA	UCSRA
 #define REG_UCSRB	UCSRB
 #define REG_UBRRL	UBRRL
+#define REG_UBRR	UBRR
 #define REG_UDR		UDR
 #define BIT_TXEN    TXEN
 #define BIT_RXEN    RXEN
@@ -38,10 +39,12 @@
 #define REG_UCSRA	UCSR0A
 #define REG_UCSRB	UCSR0B
 #define REG_UBRRL	UBRR0L
+#define REG_UBRR	UBRR0
 #define REG_UDR		UDR0
 #define BIT_TXEN    TXEN0
 #define BIT_RXEN    RXEN0
 #define BIT_UDRE    UDRE0
+#define U2X         U2X0
 #endif
 
 
@@ -62,9 +65,13 @@ uart_init(uint32_t baudrate)
   int status;
 
   /* Set up the UART device with the selected baudrate */
-#if AVR_CPU_HZ < 2000000UL && defined(U2X)
+#if defined(UART_U2X)
   REG_UCSRA = _BV(U2X);             /* improve baud rate error by using 2x clk */
+#if AVR_CPU_HZ == 20000000UL
+  REG_UBRR = (AVR_CPU_HZ / (8UL * baudrate));
+#else
   REG_UBRRL = (AVR_CPU_HZ / (8UL * baudrate)) - 1;
+#endif
 #else
   REG_UBRRL = (AVR_CPU_HZ / (16UL * baudrate)) - 1;
 #endif

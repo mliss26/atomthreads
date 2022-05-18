@@ -35,6 +35,7 @@
 #include "atomtimer.h"
 #include "uart.h"
 #include <avr/pgmspace.h>
+#include <util/delay.h>
 
 
 /* Constants */
@@ -76,7 +77,7 @@
  * future as the codebase changes but for the time being is enough to
  * cope with all of the automated tests.
  */
-#define MAIN_STACK_SIZE_BYTES       204
+#define MAIN_STACK_SIZE_BYTES       256
 
 
 /*
@@ -227,12 +228,12 @@ static void main_thread_func (uint32_t data)
     uint32_t test_status;
     int sleep_ticks;
 
-    /* Enable all LEDs (STK500-specific) */
-    DDRB = 0xFF;
-    PORTB = 0xFF;
+    /* Enable system LED (m1284-devboard-specific) */
+    DDRC = 0x80;
+    PORTC = 0x00;
 
     /* Initialise UART (9600bps) */
-    if (uart_init(9600) != 0)
+    if (uart_init(57600) != 0)
     {
         /* Error initialising UART */
     }
@@ -246,6 +247,7 @@ static void main_thread_func (uint32_t data)
 
     /* Put a message out on the UART */
     printf_P (PSTR("Go\n"));
+    _delay_ms(100);
 
     /* Start test. All tests use the same start API. */
     test_status = test_start();
@@ -292,7 +294,7 @@ static void main_thread_func (uint32_t data)
     while (1)
     {
         /* Toggle a LED (STK500-specific) */
-        PORTB ^= (1 << 7);
+        PORTC ^= 0x80;
 
         /* Sleep then toggle LED again */
         atomTimerDelay (sleep_ticks);

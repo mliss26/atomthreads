@@ -16,21 +16,27 @@ OBJCOPY=/usr/bin/avr-objcopy
 SIZE=/usr/bin/avr-size
 UISP=/usr/bin/uisp
 SIMAVR=/usr/local/bin/simavr
+AVRDUDE=avrdude
+AVARICE=avarice
 
 # Modify this to the device name of the UART used for UISP
 UISP_DEV=/dev/ttyUSB0
 
 # Modify this to the CPU you are using
-PART=atmega16
+PART=atmega1284
+F_CPU=20000000UL
+AVRDUDE_PROG=-c jtag2slow
+AVARICE_PROG=-2 -j usb
+CPPDEFINES=-DF_CPU=$(F_CPU) -DUART_U2X
 
 # Enable stack-checking. WARNING: the full automated test suite currently
 # requires a little over 1KB RAM with stack-checking enabled. If you are 
 # using a device with 1KB internal SRAM and no external SRAM then you
 # must disable stack-checking to run all of the automated tests.
-#STACK_CHECK=true
+STACK_CHECK=true
 
 # Test programs: Log stack usage to UART (if STACK_CHECK is enabled)
-#TESTS_LOG_STACK=true
+TESTS_LOG_STACK=true
 
 # Directory for built objects
 BUILD_DIR=build
@@ -59,7 +65,7 @@ vpath %.elf ./$(BUILD_DIR)
 vpath %.hex ./$(BUILD_DIR)
 
 # GCC flags
-CFLAGS=-g -mmcu=$(PART) -Wall -Werror
+CFLAGS=-g -O1 -mmcu=$(PART) -Wall -Werror $(CPPDEFINES)
 
 # Enable stack-checking options (disable if not required)
 ifeq ($(STACK_CHECK),true)
@@ -118,9 +124,17 @@ clean:
 	rm -rf build
 
 # Send to STK500
-program : $(BUILD_DIR)/$(app).hex
+program_uisp : $(BUILD_DIR)/$(app).hex
 	$(SIZE) -C --mcu=$(PART) $(BUILD_DIR)/$(app).elf
 	$(UISP) -dprog=stk500 -dserial=$(UISP_DEV) -dpart=$(PART) --erase --upload --verify if=$(BUILD_DIR)/$(app).hex
+
+# Program with AVRDude
+program: $(BUILD_DIR)/$(app).hex
+	$(SIZE) -C --mcu=$(PART) $(BUILD_DIR)/$(app).elf
+	$(AVRDUDE) -p $(PART) $(AVRDUDE_PROG) -U flash:w:$(BUILD_DIR)/$(app).hex
+
+reset:
+	@$(AVARICE) $(AVARICE_PROG) --reset-srst >/dev/null 2>&1
 
 # Generate Doxygen documentation
 doxygen:
